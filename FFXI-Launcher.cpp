@@ -23,6 +23,7 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <mutex>
+#include <atomic>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -66,6 +67,7 @@ struct AccountConfig {
 struct GlobalConfig {
     int delay;
     bool POLProxy;
+    std::string clientRegion; // "US" or "JP"
     std::vector<AccountConfig> accounts;
 };
 
@@ -337,6 +339,7 @@ std::string readConfigFile(const std::string& path) {
 void writeConfigFile(const std::string& path, const GlobalConfig& config) {
     json j;
     j["delay"] = config.delay;
+    j["clientRegion"] = config.clientRegion;
     json accounts = json::array();
     for (const auto& account : config.accounts) {
         json acc;
@@ -356,12 +359,14 @@ GlobalConfig loadConfig(const std::string& path) {
     GlobalConfig config;
     std::string content = readConfigFile(path);
     if (content.empty()) {
+        config.clientRegion = "US"; // Default to US
         return config;
     }
     try {
         json j = json::parse(content);
         config.delay = j.value("delay", 3000);
         config.POLProxy = true;
+        config.clientRegion = j.value("clientRegion", "US"); // Default to US if not set
         if (j.contains("accounts")) {
             for (const auto& acc : j["accounts"]) {
                 AccountConfig account;
@@ -375,6 +380,7 @@ GlobalConfig loadConfig(const std::string& path) {
         }
     } catch (const std::exception& e) {
         std::cerr << "Error parsing config file: " << e.what() << std::endl;
+        config.clientRegion = "US"; // Default to US on error
     }
     return config;
 }
@@ -382,6 +388,23 @@ GlobalConfig loadConfig(const std::string& path) {
 void setupConfig(GlobalConfig& config) {
     std::cout << "Setting up FFXI autoPOL configuration\n";
     std::string input;
+    
+    // Client region selection
+    while (true) {
+        std::cout << "Client region (US/JP, default US): ";
+        std::getline(std::cin, input);
+        if (input.empty()) {
+            config.clientRegion = "US";
+            break;
+        }
+        std::transform(input.begin(), input.end(), input.begin(), ::toupper);
+        if (input == "US" || input == "JP") {
+            config.clientRegion = input;
+            break;
+        }
+        std::cout << "Please enter 'US' or 'JP'.\n";
+    }
+    
     std::cout << "Delay before input starts (in seconds, default 3): ";
     std::getline(std::cin, input);
     if (input.empty()) {
@@ -529,6 +552,9 @@ void defocusExistingPOL() {
 }
 
 void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
+    // Determine port based on client region
+    int port = (config.clientRegion == "JP") ? 51300 : 51304;
+    
     // Check if the port can be opened
     SOCKET testSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     bool portAvailable = false;
@@ -538,7 +564,7 @@ void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
         sockaddr_in serverAddr;
         serverAddr.sin_family = AF_INET;
         inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
-        serverAddr.sin_port = htons(51304);
+        serverAddr.sin_port = htons(port);
         
         // Set socket options before bind
         int opt = 1;
@@ -552,7 +578,7 @@ void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
             } else {
                 if (bind(testSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
                     DWORD error = WSAGetLastError();
-                    std::cerr << "POL Redirect won't work: Port 51304 is already in use (Error: " << error << ")\n";
+                    std::cerr << "POL Redirect won't work: Port " << port << " is already in use (Error: " << error << ")\n";
                 } else {
                     portAvailable = true;
                     if (config.POLProxy) {
@@ -798,6 +824,9 @@ void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
 
 std::atomic<bool> shouldExit(false);
 
+// Global variable to store the port for the proxy server
+std::atomic<int> proxyPort(51304);
+
 void startProxyServer() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -833,7 +862,7 @@ void startProxyServer() {
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
     inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
-    serverAddr.sin_port = htons(51304);
+    serverAddr.sin_port = htons(proxyPort.load());
 
     if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         DWORD error = WSAGetLastError();
@@ -907,6 +936,7 @@ bool editConfig(GlobalConfig& config) {
         std::cout << "  [A] Add new character\n";
         std::cout << "  [D] Delete character\n";
         std::cout << "  [C] Modify timeout\n";
+        std::cout << "  [R] Change client region (US/JP)\n";
         std::cout << "  [X] Exit to selection screen\n";
         std::cout << "Enter option: ";
         std::getline(std::cin, input);
@@ -1018,6 +1048,17 @@ bool editConfig(GlobalConfig& config) {
                     std::cout << "Timeout updated.\n";
                 }
             }
+        } else if (input == "r") {
+            std::cout << "Current client region: " << config.clientRegion << "\n";
+            std::cout << "New client region (US/JP): ";
+            std::getline(std::cin, input);
+            std::transform(input.begin(), input.end(), input.begin(), ::toupper);
+            if (input == "US" || input == "JP") {
+                config.clientRegion = input;
+                std::cout << "Client region updated to " << config.clientRegion << ".\n";
+            } else {
+                std::cout << "Invalid region. Please enter 'US' or 'JP'.\n";
+            }
         } else if (input == "x") {
             return false; // Return to selection screen
         } else {
@@ -1059,7 +1100,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.19  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.20  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -1151,6 +1192,9 @@ int main(int argc, char* argv[]) {
                 continue; // Go back to selection if editConfig returned
             }
         }
+        // Set proxy port based on client region
+        proxyPort = (config.clientRegion == "JP") ? 51300 : 51304;
+        
         // Always start proxy server
         std::thread proxyThread(startProxyServer);
         // Find the account to launch

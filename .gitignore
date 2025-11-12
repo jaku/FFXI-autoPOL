@@ -1,3 +1,5 @@
 .vs/*
 Release/*
 FFXI-Launcher/*
+x64/Release/FFXI-Launcher.exe
+x64/Release/FFXI-Launcher.pdb
