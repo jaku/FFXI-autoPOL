@@ -24,10 +24,13 @@
 #include <psapi.h>
 #include <mutex>
 #include <atomic>
+#include <wincrypt.h>
+#include <conio.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "advapi32.lib")
 
 using json = nlohmann::json;
 
@@ -68,6 +71,7 @@ struct GlobalConfig {
     int delay;
     bool POLProxy;
     std::string clientRegion; // "US" or "JP"
+    bool encrypted; // Whether config file is encrypted
     std::vector<AccountConfig> accounts;
 };
 
@@ -326,6 +330,334 @@ BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam) {
     return TRUE;
 }
 
+// Base64 encoding/decoding helpers
+std::string base64_encode(const unsigned char* data, size_t len) {
+    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string result;
+    int i = 0;
+    int j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+
+    for (size_t idx = 0; idx < len; idx++) {
+        char_array_3[i++] = data[idx];
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for (i = 0; i < 4; i++)
+                result += base64_chars[char_array_4[i]];
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 3; j++)
+            char_array_3[j] = '\0';
+
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+        char_array_4[3] = char_array_3[2] & 0x3f;
+
+        for (j = 0; j < i + 1; j++)
+            result += base64_chars[char_array_4[j]];
+
+        while (i++ < 3)
+            result += '=';
+    }
+
+    return result;
+}
+
+bool is_base64(unsigned char c) {
+    return (isalnum(c) || (c == '+') || (c == '/'));
+}
+
+std::vector<unsigned char> base64_decode(const std::string& encoded) {
+    const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<unsigned char> result;
+    int in_len = encoded.size();
+    int i = 0;
+    int j = 0;
+    int in = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+
+    while (in_len-- && (encoded[in] != '=') && is_base64(encoded[in])) {
+        char_array_4[i++] = encoded[in]; in++;
+        if (i == 4) {
+            for (i = 0; i < 4; i++)
+                char_array_4[i] = base64_chars.find(char_array_4[i]);
+
+            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+            for (i = 0; (i < 3); i++)
+                result.push_back(char_array_3[i]);
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 4; j++)
+            char_array_4[j] = 0;
+
+        for (j = 0; j < 4; j++)
+            char_array_4[j] = base64_chars.find(char_array_4[j]);
+
+        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+        for (j = 0; (j < i - 1); j++) result.push_back(char_array_3[j]);
+    }
+
+    return result;
+}
+
+// Prompt for encryption password (hides input on Windows)
+std::string getPassword(const std::string& prompt) {
+    std::cout << prompt;
+    std::string password;
+    char c;
+    
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    GetConsoleMode(hStdin, &mode);
+    SetConsoleMode(hStdin, mode & ~ENABLE_ECHO_INPUT);
+    
+    while ((c = _getch()) != '\r' && c != '\n') {
+        if (c == '\b' && !password.empty()) {
+            password.pop_back();
+            std::cout << "\b \b";
+        } else if (c != '\b') {
+            password += c;
+            std::cout << '*';
+        }
+    }
+    std::cout << std::endl;
+    SetConsoleMode(hStdin, mode);
+    return password;
+}
+
+// Encrypt data using AES-256-CBC
+std::string encryptData(const std::string& plaintext, const std::string& password) {
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    HCRYPTKEY hKey = 0;
+    std::string result;
+    
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        return "";
+    }
+    
+    // Generate random salt (16 bytes) - unique per file
+    BYTE salt[16];
+    if (!CryptGenRandom(hProv, 16, salt)) {
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Generate random IV (16 bytes for AES)
+    BYTE iv[16];
+    if (!CryptGenRandom(hProv, 16, iv)) {
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Derive key from password using iterative hashing (PBKDF2-like) with per-file salt
+    std::string saltStr((char*)salt, 16);
+    std::string keyMaterial = password + saltStr;
+    BYTE key[32] = {0};
+    
+    // Iterative hashing for key derivation
+    for (int i = 0; i < 10000; i++) {
+        HCRYPTHASH hHashKey = 0;
+        if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHashKey)) {
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        if (!CryptHashData(hHashKey, (BYTE*)keyMaterial.c_str(), keyMaterial.length(), 0)) {
+            CryptDestroyHash(hHashKey);
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        DWORD hashLen = 32;
+        BYTE hash[32];
+        if (!CryptGetHashParam(hHashKey, HP_HASHVAL, hash, &hashLen, 0)) {
+            CryptDestroyHash(hHashKey);
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        keyMaterial = std::string((char*)hash, 32);
+        CryptDestroyHash(hHashKey);
+    }
+    
+    memcpy(key, keyMaterial.c_str(), 32);
+    
+    // Create key object
+    struct {
+        BLOBHEADER hdr;
+        DWORD dwKeySize;
+        BYTE rgbKey[32];
+    } keyBlob;
+    
+    keyBlob.hdr.bType = PLAINTEXTKEYBLOB;
+    keyBlob.hdr.bVersion = CUR_BLOB_VERSION;
+    keyBlob.hdr.reserved = 0;
+    keyBlob.hdr.aiKeyAlg = CALG_AES_256;
+    keyBlob.dwKeySize = 32;
+    memcpy(keyBlob.rgbKey, key, 32);
+    
+    if (!CryptImportKey(hProv, (BYTE*)&keyBlob, sizeof(keyBlob), 0, 0, &hKey)) {
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Set IV
+    if (!CryptSetKeyParam(hKey, KP_IV, iv, 0)) {
+        CryptDestroyKey(hKey);
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Encrypt data
+    DWORD dataLen = plaintext.length();
+    DWORD bufLen = dataLen + 16; // Buffer must be large enough for padding
+    std::vector<BYTE> encrypted(bufLen);
+    memcpy(encrypted.data(), plaintext.c_str(), dataLen);
+    
+    if (!CryptEncrypt(hKey, 0, TRUE, 0, encrypted.data(), &dataLen, bufLen)) {
+        CryptDestroyKey(hKey);
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Combine salt + IV + encrypted data and base64 encode
+    std::vector<unsigned char> output;
+    output.insert(output.end(), salt, salt + 16);
+    output.insert(output.end(), iv, iv + 16);
+    output.insert(output.end(), encrypted.begin(), encrypted.begin() + dataLen);
+    
+    result = "FFXI-ENCRYPTED:" + base64_encode(output.data(), output.size());
+    
+    CryptDestroyKey(hKey);
+    CryptReleaseContext(hProv, 0);
+    return result;
+}
+
+// Decrypt data using AES-256-CBC
+std::string decryptData(const std::string& ciphertext, const std::string& password) {
+    // Check magic header
+    if (ciphertext.substr(0, 15) != "FFXI-ENCRYPTED:") {
+        return "";
+    }
+    
+    std::string encoded = ciphertext.substr(15);
+    std::vector<unsigned char> data = base64_decode(encoded);
+    
+    // Need at least salt (16) + IV (16) = 32 bytes
+    if (data.size() < 32) {
+        return "";
+    }
+    
+    // Extract salt (first 16 bytes)
+    BYTE salt[16];
+    memcpy(salt, data.data(), 16);
+    
+    // Extract IV (next 16 bytes)
+    BYTE iv[16];
+    memcpy(iv, data.data() + 16, 16);
+    
+    HCRYPTPROV hProv = 0;
+    HCRYPTKEY hKey = 0;
+    
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        return "";
+    }
+    
+    // Derive key using the salt from the file
+    std::string saltStr((char*)salt, 16);
+    std::string keyMaterial = password + saltStr;
+    BYTE key[32] = {0};
+    
+    // Iterative hashing for key derivation
+    for (int i = 0; i < 10000; i++) {
+        HCRYPTHASH hHashKey = 0;
+        if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHashKey)) {
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        if (!CryptHashData(hHashKey, (BYTE*)keyMaterial.c_str(), keyMaterial.length(), 0)) {
+            CryptDestroyHash(hHashKey);
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        DWORD hashLen = 32;
+        BYTE hash[32];
+        if (!CryptGetHashParam(hHashKey, HP_HASHVAL, hash, &hashLen, 0)) {
+            CryptDestroyHash(hHashKey);
+            CryptReleaseContext(hProv, 0);
+            return "";
+        }
+        
+        keyMaterial = std::string((char*)hash, 32);
+        CryptDestroyHash(hHashKey);
+    }
+    
+    memcpy(key, keyMaterial.c_str(), 32);
+    
+    // Create key object
+    struct {
+        BLOBHEADER hdr;
+        DWORD dwKeySize;
+        BYTE rgbKey[32];
+    } keyBlob;
+    
+    keyBlob.hdr.bType = PLAINTEXTKEYBLOB;
+    keyBlob.hdr.bVersion = CUR_BLOB_VERSION;
+    keyBlob.hdr.reserved = 0;
+    keyBlob.hdr.aiKeyAlg = CALG_AES_256;
+    keyBlob.dwKeySize = 32;
+    memcpy(keyBlob.rgbKey, key, 32);
+    
+    if (!CryptImportKey(hProv, (BYTE*)&keyBlob, sizeof(keyBlob), 0, 0, &hKey)) {
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Set IV
+    if (!CryptSetKeyParam(hKey, KP_IV, iv, 0)) {
+        CryptDestroyKey(hKey);
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    // Decrypt data (skip salt and IV, which are first 32 bytes)
+    DWORD dataLen = data.size() - 32;
+    std::vector<BYTE> decrypted(data.begin() + 32, data.end());
+    
+    if (!CryptDecrypt(hKey, 0, TRUE, 0, decrypted.data(), &dataLen)) {
+        CryptDestroyKey(hKey);
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    std::string result((char*)decrypted.data(), dataLen);
+    
+    CryptDestroyKey(hKey);
+    CryptReleaseContext(hProv, 0);
+    return result;
+}
+
 std::string readConfigFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -351,8 +683,27 @@ void writeConfigFile(const std::string& path, const GlobalConfig& config) {
         accounts.push_back(acc);
     }
     j["accounts"] = accounts;
+    
+    std::string jsonContent = j.dump(4);
+    
     std::ofstream file(path);
-    file << j.dump(4);
+    if (config.encrypted) {
+        std::string password = getPassword("Enter encryption password: ");
+        if (password.empty()) {
+            std::cout << "Warning: Empty password provided. File will not be encrypted.\n";
+            file << jsonContent;
+        } else {
+            std::string encrypted = encryptData(jsonContent, password);
+            if (encrypted.empty()) {
+                std::cerr << "Encryption failed! Saving as plaintext.\n";
+                file << jsonContent;
+            } else {
+                file << encrypted;
+            }
+        }
+    } else {
+        file << jsonContent;
+    }
 }
 
 GlobalConfig loadConfig(const std::string& path) {
@@ -360,8 +711,33 @@ GlobalConfig loadConfig(const std::string& path) {
     std::string content = readConfigFile(path);
     if (content.empty()) {
         config.clientRegion = "US"; // Default to US
+        config.encrypted = false;
         return config;
     }
+    
+    // Check if file is encrypted
+    if (content.substr(0, 15) == "FFXI-ENCRYPTED:") {
+        config.encrypted = true;
+        int attempts = 0;
+        while (true) {
+            std::string password = getPassword("Enter encryption password: ");
+            std::string decrypted = decryptData(content, password);
+            if (decrypted.empty()) {
+                attempts++;
+                if (attempts == 3) {
+                    std::cout << "Incorrect password. If you've forgotten your password, you can delete config.json to start over.\n";
+                } else {
+                    std::cout << "Incorrect password. Please try again.\n";
+                }
+            } else {
+                content = decrypted;
+                break;
+            }
+        }
+    } else {
+        config.encrypted = false;
+    }
+    
     try {
         json j = json::parse(content);
         config.delay = j.value("delay", 3000);
@@ -403,6 +779,26 @@ void setupConfig(GlobalConfig& config) {
             break;
         }
         std::cout << "Please enter 'US' or 'JP'.\n";
+    }
+    
+    // Encryption option
+    while (true) {
+        std::cout << "Encrypt config file? (y/n, default n): ";
+        std::getline(std::cin, input);
+        if (input.empty()) {
+            config.encrypted = false;
+            break;
+        }
+        std::transform(input.begin(), input.end(), input.begin(), ::tolower);
+        if (input == "y" || input == "yes") {
+            config.encrypted = true;
+            std::cout << "Config file will be encrypted. You'll be prompted for a password when saving.\n";
+            break;
+        } else if (input == "n" || input == "no") {
+            config.encrypted = false;
+            break;
+        }
+        std::cout << "Please enter 'y' or 'n'.\n";
     }
     
     std::cout << "Delay before input starts (in seconds, default 3): ";
@@ -453,8 +849,8 @@ void setupConfig(GlobalConfig& config) {
         std::getline(std::cin, account.totpSecret);
         // Slot (1-4)
         while (true) {
+            std::cout << "Slots 5-20 requires Windower.\n";
             std::cout << "POL Slot number (1-20): ";
-            std::cout << "Slots 5-20 requires Windower.";
             std::getline(std::cin, input);
             if (!input.empty() && std::all_of(input.begin(), input.end(), ::isdigit)) {
                 int slot = std::stoi(input);
@@ -937,6 +1333,7 @@ bool editConfig(GlobalConfig& config) {
         std::cout << "  [D] Delete character\n";
         std::cout << "  [C] Modify timeout\n";
         std::cout << "  [R] Change client region (US/JP)\n";
+        std::cout << "  [P] Toggle encryption (currently: " << (config.encrypted ? "ON" : "OFF") << ")\n";
         std::cout << "  [X] Exit to selection screen\n";
         std::cout << "Enter option: ";
         std::getline(std::cin, input);
@@ -1059,6 +1456,12 @@ bool editConfig(GlobalConfig& config) {
             } else {
                 std::cout << "Invalid region. Please enter 'US' or 'JP'.\n";
             }
+        } else if (input == "p") {
+            config.encrypted = !config.encrypted;
+            std::cout << "Encryption " << (config.encrypted ? "enabled" : "disabled") << ".\n";
+            if (config.encrypted) {
+                std::cout << "You'll be prompted for a password when saving the config.\n";
+            }
         } else if (input == "x") {
             return false; // Return to selection screen
         } else {
@@ -1100,7 +1503,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.20  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.20-E  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -1185,6 +1588,39 @@ int main(int argc, char* argv[]) {
                         characterName = config.accounts[choice - 1].name;
                         break;
                     }
+                }
+                std::cout << "Invalid choice. Try again.\n";
+            }
+            if (characterName.empty()) {
+                continue; // Go back to selection if editConfig returned
+            }
+        }
+        // If encrypted config with only one account, still prompt for choice or edit
+        else if (characterName.empty() && config.accounts.size() == 1 && config.encrypted) {
+            std::cout << "\nSelect a character to log in with:\n";
+            std::cout << "  [1] " << config.accounts[0].name << " (slot " << config.accounts[0].slot << ")\n";
+            std::cout << "  [E] Edit configuration\n";
+            std::string input;
+            while (true) {
+                std::cout << "Enter '1' to launch or 'E' to edit configuration: ";
+                std::getline(std::cin, input);
+                std::string lowerInput = input;
+                std::transform(lowerInput.begin(), lowerInput.end(), lowerInput.begin(), ::tolower);
+                if (lowerInput == "e") {
+                    if (!editConfig(config)) {
+                        writeConfigFile(configPath, config);
+                        // After editing, reload config and restart selection
+                        config = loadConfig(configPath);
+                        break; // break inner while, return to selection
+                    } else {
+                        writeConfigFile(configPath, config);
+                        std::cout << "Configuration updated. Exiting.\n";
+                        return 0;
+                    }
+                }
+                if (input == "1") {
+                    characterName = config.accounts[0].name;
+                    break;
                 }
                 std::cout << "Invalid choice. Try again.\n";
             }
