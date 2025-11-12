@@ -430,16 +430,17 @@ void setupConfig(GlobalConfig& config) {
         std::getline(std::cin, account.totpSecret);
         // Slot (1-4)
         while (true) {
-            std::cout << "POL Slot number (1-4): ";
+            std::cout << "POL Slot number (1-20): ";
+            std::cout << "Slots 5-20 requires Windower.";
             std::getline(std::cin, input);
             if (!input.empty() && std::all_of(input.begin(), input.end(), ::isdigit)) {
                 int slot = std::stoi(input);
-                if (slot >= 1 && slot <= 4) {
+                if (slot >= 1 && slot <= 20) {
                     account.slot = slot;
                     break;
                 }
             }
-            std::cout << "POL Slot must be 1, 2, 3, or 4. Try again.\n";
+            std::cout << "POL Slot must be 1 - 20. Try again.\n";
         }
         std::cout << "Windower arguments (e.g. -p=\"ProfileName\" leave empty for none) ";
         std::getline(std::cin, account.args);
@@ -685,7 +686,7 @@ void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
         // If auto-login is enabled, check if the slot matches
         if (autoLoginEnabled && loginWValue != -1 && loginWValue != account.slot) {
             std::cout << "\nWARNING: Auto-login is enabled for slot " << loginWValue 
-                      << " but you selected slot " << account.slot << ".\n";
+                      << " but you selected slot " << account.slot << ".\n  It's recommended to disable auto-login in POL.\n";
 
             autoLoginEnabled = false;
 
@@ -1058,7 +1059,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.18  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.19  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
