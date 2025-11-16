@@ -1,0 +1,13 @@
+{
+    "accounts": [
+        {
+            "args": "",
+            "name": "jaku",
+            "password": "hax",
+            "slot": 1,
+            "totpSecret": ""
+        }
+    ],
+    "clientRegion": "EU",
+    "delay": 3000
+}

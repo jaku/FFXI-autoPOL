@@ -67,7 +67,7 @@ struct AccountConfig {
 struct GlobalConfig {
     int delay;
     bool POLProxy;
-    std::string clientRegion; // "US" or "JP"
+    std::string clientRegion; // "US" or "JP" or "EU"
     std::vector<AccountConfig> accounts;
 };
 
@@ -391,18 +391,18 @@ void setupConfig(GlobalConfig& config) {
     
     // Client region selection
     while (true) {
-        std::cout << "Client region (US/JP, default US): ";
+        std::cout << "Client region (US/JP/EU, default US): ";
         std::getline(std::cin, input);
         if (input.empty()) {
             config.clientRegion = "US";
             break;
         }
         std::transform(input.begin(), input.end(), input.begin(), ::toupper);
-        if (input == "US" || input == "JP") {
+        if (input == "US" || input == "JP" || input == "EU") {
             config.clientRegion = input;
             break;
         }
-        std::cout << "Please enter 'US' or 'JP'.\n";
+        std::cout << "Please enter 'US' or 'JP' or 'EU'.\n";
     }
     
     std::cout << "Delay before input starts (in seconds, default 3): ";
@@ -553,8 +553,12 @@ void defocusExistingPOL() {
 
 void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
     // Determine port based on client region
-    int port = (config.clientRegion == "JP") ? 51300 : 51304;
-    
+    int port = [&]() {
+        if (config.clientRegion == "JP") return 51300;
+        if (config.clientRegion == "EU") return 51302;
+        return 51304; // default (US)
+        }();
+
     // Check if the port can be opened
     SOCKET testSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     bool portAvailable = false;
@@ -1100,7 +1104,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.20  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.21  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
