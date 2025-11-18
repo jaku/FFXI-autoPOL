@@ -1104,7 +1104,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.21  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.22  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -1136,6 +1136,13 @@ int main(int argc, char* argv[]) {
             editMode = true;
         } else if (arg == "--character" && i + 1 < argc) {
             characterName = argv[++i];
+        } else if (arg == "--windower-arg" && i + 1 < argc) {
+            for (auto& acc : config.accounts) {
+                if (_stricmp(acc.name.c_str(), characterName.c_str()) == 0) {
+                    acc.args = argv[++i];
+                    break;
+                }
+            }
         }
     }
     if (setupMode || config.accounts.empty()) {
