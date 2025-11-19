@@ -286,6 +286,12 @@ void sendText(HWND hwnd, const std::string& text, int delay = 50) {
     }
 }
 
+// Forward declarations
+void removeHostsEntry();
+
+// Global flag to track if hosts entry was added (so we know to clean it up)
+std::atomic<bool> hostsEntryAdded(false);
+
 // Add back the addHostsEntry function
 void addHostsEntry(const std::string& ip) {
     std::ifstream in("C:\\Windows\\System32\\drivers\\etc\\hosts");
@@ -587,6 +593,7 @@ void launchAccount(const AccountConfig& account, const GlobalConfig& config) {
                     portAvailable = true;
                     if (config.POLProxy) {
                         addHostsEntry("127.0.0.1");
+                        hostsEntryAdded = true;
                     }
                 }
             }
@@ -831,10 +838,31 @@ std::atomic<bool> shouldExit(false);
 // Global variable to store the port for the proxy server
 std::atomic<int> proxyPort(51304);
 
+// Console control handler for cleanup on termination (Ctrl+C, window close, etc.)
+BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType) {
+    if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_CLOSE_EVENT || 
+        dwCtrlType == CTRL_BREAK_EVENT || dwCtrlType == CTRL_LOGOFF_EVENT || 
+        dwCtrlType == CTRL_SHUTDOWN_EVENT) {
+        shouldExit = true;
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
 void startProxyServer() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "Server failed to start\n";
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -842,6 +870,12 @@ void startProxyServer() {
     if (serverSocket == INVALID_SOCKET) {
         std::cerr << "Port creation failed\n";
         WSACleanup();
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -851,6 +885,12 @@ void startProxyServer() {
         std::cerr << "setsockopt SO_REUSEADDR failed\n";
         closesocket(serverSocket);
         WSACleanup();
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -860,6 +900,12 @@ void startProxyServer() {
         std::cerr << "setsockopt SO_EXCLUSIVEADDRUSE failed\n";
         closesocket(serverSocket);
         WSACleanup();
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -887,6 +933,12 @@ void startProxyServer() {
         std::cerr << ")\n";
         closesocket(serverSocket);
         WSACleanup();
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -894,6 +946,12 @@ void startProxyServer() {
         std::cerr << "Listen failed with error: " << WSAGetLastError() << "\n";
         closesocket(serverSocket);
         WSACleanup();
+        // Clean up hosts entry if proxy fails to start
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
+        shouldExit = true; // Signal main thread to exit
         return;
     }
 
@@ -930,6 +988,12 @@ void startProxyServer() {
     }
     closesocket(serverSocket);
     WSACleanup();
+    
+    // Clean up hosts entry when proxy server exits
+    if (hostsEntryAdded.load()) {
+        removeHostsEntry();
+        hostsEntryAdded = false;
+    }
 }
 
 bool editConfig(GlobalConfig& config) {
@@ -1104,7 +1168,7 @@ void removeHostsEntry() {
 // Update main to remove hosts entry before exiting
 int main(int argc, char* argv[]) {
     std::cout << "Created by: jaku | https://twitter.com/jaku\n";
-    std::cout << "Version: 0.0.22  | https://github.com/jaku/FFXI-autoPOL\n";
+    std::cout << "Version: 0.0.23  | https://github.com/jaku/FFXI-autoPOL\n";
     DEBUG_KEY_PRESSES = false;
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -1117,6 +1181,9 @@ int main(int argc, char* argv[]) {
     
     // Clean up any existing hosts file entries at startup
     removeHostsEntry();
+    
+    // Register console control handler to clean up on termination
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -1233,8 +1300,11 @@ int main(int argc, char* argv[]) {
         // Wait for a request, then exit
         while (!shouldExit) { Sleep(100); }
         proxyThread.join();
-        // Remove hosts entry before exiting
-        removeHostsEntry();
+        // Remove hosts entry before exiting (cleanup is also done in proxy thread and handler, but this ensures it)
+        if (hostsEntryAdded.load()) {
+            removeHostsEntry();
+            hostsEntryAdded = false;
+        }
         return 0;
     }
     return 0;
