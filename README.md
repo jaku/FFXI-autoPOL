@@ -129,7 +129,7 @@ If you're on the Phoenix server, my main on there is Jakubowski, just waving hi 
 If you're using Linux or Steam Deck, you'll need to manually add an entry to your hosts file to get the autoPOL login to fully log you into the game after entering your password:
 
 ```bash
-sudo echo "127.0.0.1 wh000.pol.com" >> /etc/hosts
+echo "127.0.0.1 wh000.pol.com" | sudo tee -a /etc/hosts
 ```
 
 To remove this entry when you no longer want to use the program:
