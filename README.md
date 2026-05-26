@@ -20,7 +20,7 @@ A simple tool to automate logging into Final Fantasy XI using either Windower or
   - You will enter a name for each character (no spaces, must be unique)
   - Password
   - TOTP secret (if you use one)
-  - Slot number (1-4)
+  - Slot number (1-20)
   - (Optional) Windower arguments (e.g. `-p="ProfileName"`)
 
 ## How to get your TOTP Secret
