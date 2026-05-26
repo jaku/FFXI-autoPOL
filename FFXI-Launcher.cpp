@@ -363,6 +363,7 @@ void writeConfigFile(const std::string& path, const GlobalConfig& config) {
 
 GlobalConfig loadConfig(const std::string& path) {
     GlobalConfig config;
+    config.POLProxy = true;
     std::string content = readConfigFile(path);
     if (content.empty()) {
         config.clientRegion = "US"; // Default to US
@@ -371,7 +372,6 @@ GlobalConfig loadConfig(const std::string& path) {
     try {
         json j = json::parse(content);
         config.delay = j.value("delay", 3000);
-        config.POLProxy = true;
         config.clientRegion = j.value("clientRegion", "US"); // Default to US if not set
         if (j.contains("accounts")) {
             for (const auto& acc : j["accounts"]) {
@@ -1179,9 +1179,6 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Clean up any existing hosts file entries at startup
-    removeHostsEntry();
-    
     // Register console control handler to clean up on termination
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     
@@ -1203,6 +1200,8 @@ int main(int argc, char* argv[]) {
             editMode = true;
         } else if (arg == "--character" && i + 1 < argc) {
             characterName = argv[++i];
+        } else if (arg == "--no-proxy") {
+            config.POLProxy = false;
         } else if (arg == "--windower-arg" && i + 1 < argc) {
             for (auto& acc : config.accounts) {
                 if (_stricmp(acc.name.c_str(), characterName.c_str()) == 0) {
@@ -1212,6 +1211,12 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+
+    // Clean up any existing hosts file entries at startup
+    if (config.POLProxy) {
+        removeHostsEntry();
+    }
+
     if (setupMode || config.accounts.empty()) {
         setupConfig(config);
         writeConfigFile(configPath, config);
@@ -1270,11 +1275,6 @@ int main(int argc, char* argv[]) {
                 continue; // Go back to selection if editConfig returned
             }
         }
-        // Set proxy port based on client region
-        proxyPort = (config.clientRegion == "JP") ? 51300 : 51304;
-        
-        // Always start proxy server
-        std::thread proxyThread(startProxyServer);
         // Find the account to launch
         AccountConfig* toLaunch = nullptr;
         if (characterName.empty()) {
@@ -1296,6 +1296,15 @@ int main(int argc, char* argv[]) {
             std::cout << "No account found for requested character name.\n";
             return 1;
         }
+        if (!config.POLProxy) {
+            launchAccount(*toLaunch, config);
+            return 0;
+        }
+        // Set proxy port based on client region
+        proxyPort = (config.clientRegion == "JP") ? 51300 : 51304;
+
+        // Start proxy server
+        std::thread proxyThread(startProxyServer);
         launchAccount(*toLaunch, config);
         // Wait for a request, then exit
         while (!shouldExit) { Sleep(100); }

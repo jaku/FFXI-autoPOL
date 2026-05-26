@@ -54,6 +54,10 @@ WARNING: This will open you up to a little more risk if your PC is compromised a
   autoPOL.exe --character NAME
   ```
   Replace `NAME` with the character name you set up in the config.
+- To launch without the POL proxy for that run, add `--no-proxy`:
+  ```
+  autoPOL.exe --character NAME --no-proxy
+  ```
 - While the application is logging you in, your mouse and keyboard will be locked to prevent interfering with the process. This should only last about 5 seconds.
 - If it lasts longer than expected you can press Windows + L, or Ctrl+Alt+Del to disable the lock and resume control of your keyboard and mouse!
 
